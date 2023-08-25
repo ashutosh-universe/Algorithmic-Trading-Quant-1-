@@ -1,86 +1,92 @@
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import datetime as dt
 import copy
+import matplotlib.pyplot as plt
 
+
+def CAGR(DF):
+    "function to calculate the Cumulative Annual Growth Rate of a trading strategy"
+    df = DF.copy()
+    df["cum_return"] = (1 + df["mon_ret"]).cumprod()
+    n = len(df)/12
+    CAGR = (df["cum_return"].tolist()[-1])**(1/n) - 1
+    return CAGR
+
+def volatility(DF):
+    "function to calculate annualized volatility of a trading strategy"
+    df = DF.copy()
+    vol = df["mon_ret"].std() * np.sqrt(12)
+    return vol
+
+def sharpe(DF,rf):
+    "function to calculate sharpe ratio ; rf is the risk free rate"
+    df = DF.copy()
+    sr = (CAGR(df) - rf)/volatility(df)
+    return sr
+    
+
+def max_dd(DF):
+    "function to calculate max drawdown"
+    df = DF.copy()
+    df["cum_return"] = (1 + df["mon_ret"]).cumprod()
+    df["cum_roll_max"] = df["cum_return"].cummax()
+    df["drawdown"] = df["cum_roll_max"] - df["cum_return"]
+    df["drawdown_pct"] = df["drawdown"]/df["cum_roll_max"]
+    max_dd = df["drawdown_pct"].max()
+    return max_dd
 
 # Download historical data (monthly) for DJI constituent stocks
 
-tickers = ["AAPL","GOOG","MSFT","AMZN","TSLA","NVDA","JPM","BAC","WFC","UNH"]
+tickers = ["MMM","AXP","T","BA","CAT","CSCO","KO", "XOM","GE","GS","HD",
+           "IBM","INTC","JNJ","JPM","MCD","MRK","MSFT","NKE","PFE","PG","TRV",
+           "UNH","VZ","V","WMT","DIS"]
 
-ohlc_week = {} # directory with ohlc value for each stock            
-start = dt.datetime.today()-dt.timedelta(365*4)
+ohlc_mon = {} # directory with ohlc value for each stock            
+start = dt.datetime.today()-dt.timedelta(3650)
 end = dt.datetime.today()
 
 # looping over tickers and creating a dataframe with close prices
 for ticker in tickers:
-    ohlc_week[ticker] = yf.download(ticker,start,end,interval='1wk')
-    ohlc_week[ticker].dropna(inplace=True,how="all")
+    ohlc_mon[ticker] = yf.download(ticker,start,end,interval='1mo')
+    ohlc_mon[ticker].dropna(inplace=True,how="all")
  
-#tickers = ohlc_mon.keys() # redefine tickers variable after removing any tickers with corrupted data
+tickers = ohlc_mon.keys() # redefine tickers variable after removing any tickers with corrupted data
 
-def ATR(DF, n=14):
-    "function to calculate True Range and Average True Range"
-    df = DF.copy()
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-PC"] = abs(df["High"] - df["Adj Close"].shift(1))
-    df["L-PC"] = abs(df["Low"] - df["Adj Close"].shift(1))
-    df["TR"] = df[["H-L","H-PC","L-PC"]].max(axis=1, skipna=False)
-    df["ATR"] = df["TR"].ewm(com=n, min_periods=n).mean()
-    return df["ATR"]
-atr_df = pd.DataFrame()
-for ticker in tickers:
-    atr_df[ticker] = ATR(ohlc_week[ticker])
-    atr_df[ticker].dropna(inplace=True,how="any")
-    atr_df[ticker] = atr_df[ticker][52:]
-    
 ################################Backtesting####################################
 
 # calculating monthly return for each stock and consolidating return info by stock in a separate dataframe
-ohlc_dict = copy.deepcopy(ohlc_week)
+ohlc_dict = copy.deepcopy(ohlc_mon)
 return_df = pd.DataFrame()
 for ticker in tickers:
-    print("calculating weekly rolling return for ",ticker)
-    ohlc_dict[ticker]["week_ret"] = ohlc_dict[ticker]["Adj Close"].pct_change()
-    ohlc_dict[ticker]["rweek_ret"] = ohlc_dict[ticker]["week_ret"].rolling(window=52).sum()
-    return_df[ticker] = ohlc_dict[ticker]["rweek_ret"]
+    print("calculating monthly return for ",ticker)
+    ohlc_dict[ticker]["mon_ret"] = ohlc_dict[ticker]["Adj Close"].pct_change()
+    return_df[ticker] = ohlc_dict[ticker]["mon_ret"]
 return_df.dropna(inplace=True)
 
 
 # function to calculate portfolio return iteratively
-def pflio(DF,x=5):
+def pflio(DF,m,x):
     """Returns cumulative portfolio return
-    DF = dataframe with weekly return info for all stocks
+    DF = dataframe with monthly return info for all stocks
     m = number of stock in the portfolio
-    x = number of stocks to present in the portfolio"""
+    x = number of underperforming stocks to be removed from portfolio monthly"""
     df = DF.copy()
-    portfolio =[]
-    weekly_ret = []
-    for i in range(0,len(df)):
-        best_list = df.iloc[i,:].sort_values(ascending=False)[:5].index.values.tolist()
-        portfolio= portfolio + best_list
-        print(best_list)
-        weeklyti_ret=0
-        invested = 0
-        for ticker in best_list:
-            current_price = ohlc_dict[ticker]['Close'].iloc[i]
-            open_price = ohlc_dict[ticker]['Open'].iloc[i]
-            stop_loss = open_price - (2 * atr_df[ticker][i])
-            invested += ohlc_dict[ticker]['Open'].iloc[i]
-            if current_price > open_price:
-                weeklyti_ret += current_price - open_price
-
-        # Check if stop loss is hit
-            if current_price <= stop_loss:
-                weeklyti_ret += stop_loss - open_price
-    
-        weekly_ret.append((weeklyti_ret/invested))
-    weekly_ret_df = pd.DataFrame(np.array(weekly_ret),columns=["week_ret"])
-    return weekly_ret_df
-
-weekly_return = pflio(return_df,5)
-
+    portfolio = []
+    monthly_ret = [0]
+    for i in range(len(df)):
+        if len(portfolio) > 0:
+            monthly_ret.append(df[portfolio].iloc[i,:].mean())
+            bad_stocks = df[portfolio].iloc[i,:].sort_values(ascending=True)[:x].index.values.tolist()
+            portfolio = [t for t in portfolio if t not in bad_stocks]
+        fill = m - len(portfolio)
+        new_picks = df.iloc[i,:].sort_values(ascending=False)[:fill].index.values.tolist()
+        portfolio = portfolio + new_picks
+        print(portfolio)
+    monthly_ret_df = pd.DataFrame(np.array(monthly_ret),columns=["mon_ret"])
+    return monthly_ret_df
 
 
 #calculating overall strategy's KPIs
